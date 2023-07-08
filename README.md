@@ -1,4 +1,4 @@
-# [ videoqaipynb ](https://github.com/ONE-THING-9/MISC/blob/W%26B/videoqa.ipynb) 
+# [ videoqa.ipynb ](https://github.com/ONE-THING-9/MISC/blob/W%26B/videoqa.ipynb) 
 
 Question - answering in video
 
