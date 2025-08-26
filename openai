@@ -1,0 +1,281 @@
+Perfect, you’re preparing an excellent comparative presentation.
+Let’s go point by point — for each, I’ll give you:
+
+1. **Pointer-based comparison with Vanilla Transformer**
+2. **Small math explanation**
+3. **Minimal code snippet (pseudo-PyTorch style)**
+
+---
+
+# 🔹 Architectural Differences: Vanilla Transformer vs Modern LLMs
+
+---
+
+## **1. Post-LayerNorm**
+
+**Vanilla Transformer:**
+
+* Used **Pre-LayerNorm** in encoder/decoder blocks.
+* LayerNorm applied **before** attention and FFN sublayers.
+
+**Modern LLMs (e.g., GPT-2/3, LLaMA):**
+
+* Use **Post-LayerNorm** or **RMSNorm** (variant).
+* LayerNorm applied **after** residual connection.
+* Helps stability in very deep networks.
+
+**Math:**
+For input $x$, attention output $A(x)$:
+
+* **Pre-LN:** $y = x + \text{Dropout}(A(\text{LN}(x)))$
+* **Post-LN:** $y = \text{LN}(x + \text{Dropout}(A(x)))$
+
+**Code:**
+
+```python
+# Post-LN block
+def transformer_block(x):
+    attn_out = self.attn(x)
+    x = x + attn_out
+    x = self.norm(x)   # <-- post
+    return x
+```
+
+---
+
+## **2. Multi-Query Attention (MQA)**
+
+**Vanilla Transformer:**
+
+* Each head has **its own Q, K, V projections**.
+* Memory grows as O(#heads × d\_k).
+
+**Modern LLMs:**
+
+* **MQA:** Multiple query projections, **shared K and V**.
+* Saves memory in KV-cache during inference.
+
+**Math:**
+
+* Vanilla: $Q_i = XW^Q_i, K_i = XW^K_i, V_i = XW^V_i$ for each head $i$.
+* MQA: $Q_i = XW^Q_i, K = XW^K, V = XW^V$ (shared).
+
+**Code:**
+
+```python
+# Multi-query attention
+Q = [x @ Wq[i] for i in range(num_heads)]  # many queries
+K = x @ Wk  # shared
+V = x @ Wv  # shared
+```
+
+---
+
+## **3. Grouped Query Attention (GQA)**
+
+**Vanilla:** Same as above, unique K,V per head.
+
+**MQA vs GQA:**
+
+* **MQA:** all heads share 1 KV.
+* **GQA:** heads are divided into groups → each group shares KV.
+* Trade-off between efficiency and expressiveness.
+
+**Math:**
+
+* Group $g$: $K_g = XW^K_g, V_g = XW^V_g$, shared within group.
+
+**Code:**
+
+```python
+# GQA with g groups
+groups = num_heads // g
+for i in range(groups):
+    Q_group = [x @ Wq[h] for h in group_heads[i]]
+    K_group = x @ Wk[i]
+    V_group = x @ Wv[i]
+```
+
+---
+
+## **4. KV Cache**
+
+**Vanilla Transformer:**
+
+* During inference, recomputes KV for **all past tokens** each step.
+
+**Modern LLMs:**
+
+* Store past **K, V tensors** (KV cache).
+* New queries attend only to cached KV + new KV.
+* Makes autoregressive decoding **O(1) per token** instead of **O(T)**.
+
+**Math:**
+
+$$
+K_{t} = [K_{1}, K_{2}, \dots, K_{t-1}, K_{new}]
+$$
+
+**Code:**
+
+```python
+# KV cache update
+K_cache.append(K_new)
+V_cache.append(V_new)
+out = attention(Q_new, K_cache, V_cache)
+```
+
+---
+
+## **5. Feed Forward Layer (SwiGLU, GeGLU, etc.)**
+
+**Vanilla Transformer:**
+
+* FFN = Linear → ReLU → Linear.
+
+**Modern LLMs:**
+
+* Use **gated activations**: SwiGLU, GeGLU.
+* Improves expressiveness and gradient flow.
+
+**Math (SwiGLU):**
+
+$$
+\text{FFN}(x) = (xW_1) \odot \sigma(xW_2) W_3
+$$
+
+**Code:**
+
+```python
+# SwiGLU
+def swiglu(x):
+    return (x @ W1) * torch.sigmoid(x @ W2)
+```
+
+---
+
+## **6. Mixture of Experts (MoE)**
+
+**Vanilla:**
+
+* Single dense FFN.
+
+**Modern LLMs (Switch, Mixtral):**
+
+* Many expert FFNs.
+* Router selects top-k experts per token.
+
+**Math:**
+
+$$
+y = \sum_{i \in \text{TopK}(x)} p_i(x) \cdot \text{Expert}_i(x)
+$$
+
+**Code:**
+
+```python
+# MoE forward
+experts_out = [expert(x) for expert in experts]
+weights = router(x)  # choose top-k experts
+out = sum(w * e for w, e in zip(weights, experts_out))
+```
+
+---
+
+## **7. RoPE Positional Embedding (Rotary)**
+
+**Vanilla:**
+
+* Learned or sinusoidal position embeddings **added** to input.
+
+**Modern (RoPE in LLaMA, GPT-J):**
+
+* Encodes positions via **rotating Q,K vectors in complex space**.
+* Handles long-context better, extrapolates.
+
+**Math:**
+For position $p$, embedding dim $2i$:
+
+$$
+\begin{bmatrix}q_{2i} \\ q_{2i+1}\end{bmatrix}
+\mapsto
+\begin{bmatrix}
+q_{2i} \cos \theta_p - q_{2i+1} \sin \theta_p \\
+q_{2i} \sin \theta_p + q_{2i+1} \cos \theta_p
+\end{bmatrix}
+$$
+
+**Code:**
+
+```python
+def apply_rope(q, pos):
+    cos, sin = rope_table[pos]
+    q_even, q_odd = q[::2], q[1::2]
+    q_rot = q_even * cos - q_odd * sin
+    q_rot2 = q_even * sin + q_odd * cos
+    return torch.stack([q_rot, q_rot2], dim=-1).flatten(-2)
+```
+
+---
+
+## **8. Multi-Head Latent Attention (MHA → MLA)**
+
+**Vanilla:**
+
+* Attention is directly **token-to-token**.
+
+**Modern (DeepSeek MLA, 2024):**
+
+* Insert latent space → Q maps tokens → latent → attends → back to tokens.
+* Reduces cost from O(T²) to O(TL) (L = latent size).
+
+**Math:**
+
+$$
+\text{Attention}(X) = \text{softmax}\left(\frac{QX^T}{\sqrt{d}}\right)X
+$$
+
+$$
+\text{MLA}(X) = \text{softmax}\left(\frac{QW_L}{\sqrt{d}}\right)(W_L^T X)
+$$
+
+**Code:**
+
+```python
+# Multi-head latent attention
+Q_latent = x @ Wq
+Latent = torch.randn(batch, latent_dim)
+attn_scores = Q_latent @ Latent.T
+```
+
+---
+
+## **9. Flash Attention**
+
+**Vanilla:**
+
+* Attention = $\text{softmax}(QK^T / \sqrt{d})V$.
+* Explicitly materializes attention matrix (O(T²) memory).
+
+**Modern:**
+
+* **FlashAttention** = IO-aware, computes attention in blocks.
+* Never stores full attention matrix → linear memory.
+
+**Math:**
+Instead of computing full softmax:
+
+$$
+\text{softmax}(QK^T)V = \bigoplus_{blocks} \text{softmax\_block}(Q_b, K_b, V_b)
+$$
+
+**Code:**
+
+```python
+# PyTorch flash attention (xFormers)
+out = flash_attn_func(Q, K, V)  # memory-efficient
+```
+
+---
+
+👉 Do you want me to also **make a single combined diagram** showing how each of these changes evolved from Vanilla Transformer (like a timeline/architecture map)? That would make your presentation visually strong.
