@@ -1,0 +1,518 @@
+# Vanilla Transformer vs Modern LLM Architecture Comparison
+
+## 1. Post LayerNorm
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Uses Pre-LayerNorm (LayerNorm before attention/FFN)
+- **Modern LLMs**: Use Post-LayerNorm (LayerNorm after attention/FFN)
+- **Benefits**: Better gradient flow, improved training stability, easier optimization
+- **Used in**: GPT models, LLaMA, PaLM
+
+### Code Example:
+```python
+# Vanilla Transformer (Pre-LayerNorm)
+class VanillaTransformerBlock(nn.Module):
+    def forward(self, x):
+        # Pre-norm
+        norm_x = self.layer_norm1(x)
+        attn_out = self.attention(norm_x)
+        x = x + attn_out
+        
+        norm_x = self.layer_norm2(x)
+        ffn_out = self.ffn(norm_x)
+        x = x + ffn_out
+        return x
+
+# Modern LLM (Post-LayerNorm)
+class ModernTransformerBlock(nn.Module):
+    def forward(self, x):
+        # Post-norm
+        attn_out = self.attention(x)
+        x = self.layer_norm1(x + attn_out)
+        
+        ffn_out = self.ffn(x)
+        x = self.layer_norm2(x + ffn_out)
+        return x
+```
+
+### Mathematical Difference:
+```
+Vanilla:  y = x + Attention(LayerNorm(x))
+          z = y + FFN(LayerNorm(y))
+
+Modern:   y = LayerNorm(x + Attention(x))
+          z = LayerNorm(y + FFN(y))
+```
+
+---
+
+## 2. Multi-Query Attention (MQA)
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Each head has separate Q, K, V matrices
+- **MQA**: Single K, V shared across all heads, separate Q for each head
+- **Benefits**: Reduced memory usage, faster inference, maintained quality
+- **Memory Reduction**: ~50% reduction in KV cache size
+- **Used in**: PaLM, Falcon models
+
+### Code Example:
+```python
+# Vanilla Multi-Head Attention
+class VanillaMultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        
+        self.q_proj = nn.Linear(d_model, d_model)  # num_heads * d_head
+        self.k_proj = nn.Linear(d_model, d_model)  # num_heads * d_head
+        self.v_proj = nn.Linear(d_model, d_model)  # num_heads * d_head
+
+# Multi-Query Attention
+class MultiQueryAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        
+        self.q_proj = nn.Linear(d_model, d_model)  # num_heads * d_head
+        self.k_proj = nn.Linear(d_model, self.d_head)  # Single head
+        self.v_proj = nn.Linear(d_model, self.d_head)  # Single head
+    
+    def forward(self, x):
+        B, L, D = x.shape
+        
+        Q = self.q_proj(x).view(B, L, self.num_heads, self.d_head)
+        K = self.k_proj(x).view(B, L, 1, self.d_head).expand(-1, -1, self.num_heads, -1)
+        V = self.v_proj(x).view(B, L, 1, self.d_head).expand(-1, -1, self.num_heads, -1)
+        
+        # Attention computation remains the same
+        attention = torch.softmax(Q @ K.transpose(-1, -2) / math.sqrt(self.d_head), dim=-1)
+        out = attention @ V
+        return out.reshape(B, L, D)
+```
+
+### Mathematical Difference:
+```
+Vanilla MHA:  Q_i, K_i, V_i = x W_q^i, x W_k^i, x W_v^i  (for each head i)
+
+MQA:          Q_i = x W_q^i  (separate for each head)
+              K, V = x W_k, x W_v  (shared across heads)
+```
+
+---
+
+## 3. Grouped Query Attention (GQA)
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Each head has separate K, V
+- **GQA**: Groups of heads share K, V matrices
+- **Benefits**: Balance between MHA quality and MQA efficiency
+- **Flexibility**: Can configure number of groups (1 group = MQA, num_heads groups = MHA)
+- **Used in**: LLaMA 2, Code Llama
+
+### Code Example:
+```python
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, d_model, num_heads, num_groups):
+        self.num_heads = num_heads
+        self.num_groups = num_groups
+        self.group_size = num_heads // num_groups
+        self.d_head = d_model // num_heads
+        
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, num_groups * self.d_head)
+        self.v_proj = nn.Linear(d_model, num_groups * self.d_head)
+    
+    def forward(self, x):
+        B, L, D = x.shape
+        
+        Q = self.q_proj(x).view(B, L, self.num_heads, self.d_head)
+        K = self.k_proj(x).view(B, L, self.num_groups, self.d_head)
+        V = self.v_proj(x).view(B, L, self.num_groups, self.d_head)
+        
+        # Repeat K, V for each group
+        K = K.repeat_interleave(self.group_size, dim=2)
+        V = V.repeat_interleave(self.group_size, dim=2)
+        
+        attention = torch.softmax(Q @ K.transpose(-1, -2) / math.sqrt(self.d_head), dim=-1)
+        out = attention @ V
+        return out.reshape(B, L, D)
+```
+
+### Mathematical Difference:
+```
+Vanilla:  Each head i has Q_i, K_i, V_i
+GQA:      Heads 1,2 share K_1, V_1
+          Heads 3,4 share K_2, V_2
+          etc.
+
+Group j:  K_j, V_j shared by heads {j*group_size, ..., (j+1)*group_size-1}
+```
+
+---
+
+## 4. KV Cache
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Recomputes all K, V for each token generation
+- **KV Cache**: Stores and reuses previously computed K, V values
+- **Benefits**: Massive speedup in autoregressive generation (O(1) vs O(n))
+- **Memory Trade-off**: Uses more memory but dramatically faster inference
+- **Essential for**: Real-time chat applications, long sequence generation
+
+### Code Example:
+```python
+# Without KV Cache (Vanilla)
+class VanillaGeneration:
+    def generate_token(self, input_ids, model):
+        # Recompute everything for each new token
+        return model(input_ids)[:, -1, :]  # Only use last token
+
+# With KV Cache
+class KVCacheAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        self.kv_cache = {}
+    
+    def forward(self, x, position, use_cache=False):
+        B, L, D = x.shape
+        
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+        
+        if use_cache and position > 0:
+            # Append to existing cache
+            K = torch.cat([self.kv_cache['K'], K], dim=1)
+            V = torch.cat([self.kv_cache['V'], V], dim=1)
+        
+        if use_cache:
+            self.kv_cache['K'] = K
+            self.kv_cache['V'] = V
+        
+        # Only compute attention for new tokens
+        attention = torch.softmax(Q @ K.transpose(-1, -2) / math.sqrt(self.d_head), dim=-1)
+        return attention @ V
+```
+
+### Mathematical Difference:
+```
+Without Cache: For sequence length n, compute attention n times
+               Time complexity: O(n²) for each new token
+
+With Cache:    Store K_prev, V_prev, only compute K_new, V_new
+               K_total = concat(K_prev, K_new)
+               V_total = concat(V_prev, V_new)
+               Time complexity: O(n) for each new token
+```
+
+---
+
+## 5. Changes in Feed Forward Layer
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Simple 2-layer MLP with ReLU
+- **Modern LLMs**: SwiGLU activation, different architectures
+- **Benefits**: Better performance, more parameters for same computational cost
+- **Variations**: GeGLU, ReGLU, different expansion ratios
+- **Used in**: LLaMA, PaLM, most modern LLMs
+
+### Code Example:
+```python
+# Vanilla FFN
+class VanillaFFN(nn.Module):
+    def __init__(self, d_model, d_ff):
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        return self.linear2(self.relu(self.linear1(x)))
+
+# Modern SwiGLU FFN
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d_model, d_ff):
+        self.w1 = nn.Linear(d_model, d_ff, bias=False)  # Gate
+        self.w2 = nn.Linear(d_ff, d_model, bias=False)   # Down
+        self.w3 = nn.Linear(d_model, d_ff, bias=False)   # Up
+    
+    def forward(self, x):
+        gate = F.silu(self.w1(x))  # SiLU activation
+        up = self.w3(x)
+        return self.w2(gate * up)  # Gated multiplication
+```
+
+### Mathematical Difference:
+```
+Vanilla FFN:  FFN(x) = W₂ · ReLU(W₁ · x + b₁) + b₂
+
+SwiGLU:      FFN(x) = W₂ · (SiLU(W₁ · x) ⊙ W₃ · x)
+             where SiLU(x) = x · sigmoid(x)
+             and ⊙ is element-wise multiplication
+```
+
+---
+
+## 6. Mixture of Experts (MoE)
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Single FFN processes all tokens
+- **MoE**: Multiple expert FFNs, router selects which experts to use
+- **Benefits**: Massive parameter scaling with constant compute cost
+- **Sparsity**: Only top-k experts active per token
+- **Challenges**: Load balancing, communication overhead
+- **Used in**: Switch Transformer, GLaM, PaLM-2
+
+### Code Example:
+```python
+# Vanilla single FFN
+class VanillaFFN(nn.Module):
+    def forward(self, x):
+        return self.ffn(x)
+
+# Mixture of Experts
+class MixtureOfExperts(nn.Module):
+    def __init__(self, d_model, num_experts, top_k, expert_capacity):
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.experts = nn.ModuleList([
+            SwiGLUFFN(d_model, d_model * 4) for _ in range(num_experts)
+        ])
+        self.router = nn.Linear(d_model, num_experts)
+    
+    def forward(self, x):
+        B, L, D = x.shape
+        x_flat = x.view(-1, D)  # (B*L, D)
+        
+        # Router decides which experts to use
+        router_logits = self.router(x_flat)  # (B*L, num_experts)
+        router_probs = F.softmax(router_logits, dim=-1)
+        
+        # Select top-k experts
+        top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)  # Renormalize
+        
+        # Compute expert outputs
+        expert_outputs = torch.zeros_like(x_flat)
+        for i, expert in enumerate(self.experts):
+            expert_mask = (top_k_indices == i).any(dim=-1)
+            if expert_mask.any():
+                expert_input = x_flat[expert_mask]
+                expert_output = expert(expert_input)
+                
+                # Weight by router probabilities
+                expert_weights = top_k_probs[expert_mask][:, top_k_indices[expert_mask] == i]
+                expert_outputs[expert_mask] += expert_weights.unsqueeze(-1) * expert_output
+        
+        return expert_outputs.view(B, L, D)
+```
+
+### Mathematical Difference:
+```
+Vanilla:  y = FFN(x)
+
+MoE:      Router: p = softmax(x · W_router)
+          Select: top_k_indices = topk(p)
+          Output: y = Σᵢ pᵢ · Expertᵢ(x)  for i in top_k_indices
+```
+
+---
+
+## 7. RoPE Positional Embedding
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Learned or sinusoidal absolute position embeddings
+- **RoPE**: Rotary position embedding with relative position information
+- **Benefits**: Better extrapolation to longer sequences, relative position encoding
+- **Key Insight**: Rotates query and key vectors based on position
+- **Used in**: LLaMA, PaLM, GPT-NeoX
+
+### Code Example:
+```python
+# Vanilla Absolute Positional Embedding
+class VanillaPositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        self.pos_embedding = nn.Embedding(max_len, d_model)
+    
+    def forward(self, x, positions):
+        return x + self.pos_embedding(positions)
+
+# RoPE (Rotary Position Embedding)
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(self, d_head, max_len=10000):
+        self.d_head = d_head
+        # Compute rotation frequencies
+        inv_freq = 1.0 / (max_len ** (torch.arange(0, d_head, 2).float() / d_head))
+        self.register_buffer('inv_freq', inv_freq)
+    
+    def forward(self, q, k, positions):
+        # Create rotation matrix
+        freqs = torch.outer(positions.float(), self.inv_freq)
+        cos_freqs = torch.cos(freqs)
+        sin_freqs = torch.sin(freqs)
+        
+        # Apply rotation to q and k
+        q_rot = self.rotate_half(q, cos_freqs, sin_freqs)
+        k_rot = self.rotate_half(k, cos_freqs, sin_freqs)
+        return q_rot, k_rot
+    
+    def rotate_half(self, x, cos, sin):
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).flatten(-2)
+```
+
+### Mathematical Difference:
+```
+Vanilla:  x = token_embedding + position_embedding
+
+RoPE:     For position m, dimension d:
+          θⱼ = 10000^(-2j/d) for j = 0, 1, ..., d/2-1
+          
+          Rotation matrix: R_m = [cos(mθⱼ)  -sin(mθⱼ)]
+                                 [sin(mθⱼ)   cos(mθⱼ)]
+          
+          q_m = R_m · q_m,  k_n = R_n · k_n
+```
+
+---
+
+## 8. Multi-Head Latent Attention (MLA)
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Standard multi-head attention with full Q, K, V
+- **MLA**: Compressed latent representations for K, V
+- **Benefits**: Reduced KV cache size, maintained attention quality
+- **Key Innovation**: Low-rank compression of key-value pairs
+- **Used in**: DeepSeek-V2, some experimental architectures
+
+### Code Example:
+```python
+# Vanilla Multi-Head Attention (repeated for reference)
+class VanillaMultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+
+# Multi-Head Latent Attention
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(self, d_model, num_heads, latent_dim):
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        self.latent_dim = latent_dim
+        
+        self.q_proj = nn.Linear(d_model, d_model)
+        
+        # Compress to latent space
+        self.kv_compress = nn.Linear(d_model, latent_dim)
+        
+        # Decompress to full K, V
+        self.k_decompress = nn.Linear(latent_dim, d_model)
+        self.v_decompress = nn.Linear(latent_dim, d_model)
+    
+    def forward(self, x):
+        B, L, D = x.shape
+        
+        Q = self.q_proj(x).view(B, L, self.num_heads, self.d_head)
+        
+        # Compress then decompress K, V
+        latent = self.kv_compress(x)  # (B, L, latent_dim)
+        K = self.k_decompress(latent).view(B, L, self.num_heads, self.d_head)
+        V = self.v_decompress(latent).view(B, L, self.num_heads, self.d_head)
+        
+        attention = torch.softmax(Q @ K.transpose(-1, -2) / math.sqrt(self.d_head), dim=-1)
+        out = attention @ V
+        return out.reshape(B, L, D)
+```
+
+### Mathematical Difference:
+```
+Vanilla:  K = x W_k,  V = x W_v
+
+MLA:      Latent: z = x W_compress  (low-dimensional)
+          K = z W_k^decomp,  V = z W_v^decomp
+          
+Memory:   Vanilla stores O(L × d_model)
+          MLA stores O(L × latent_dim) where latent_dim << d_model
+```
+
+---
+
+## 9. Flash Attention
+
+### Comparison with Vanilla Transformer:
+- **Vanilla Transformer**: Standard attention with O(n²) memory for storing attention matrix
+- **Flash Attention**: Memory-efficient attention with tiling and recomputation
+- **Benefits**: Reduced memory usage, faster training on long sequences
+- **Key Innovation**: Block-sparse computation, online softmax
+- **Algorithm**: Tile-based computation without materializing full attention matrix
+- **Used in**: Most modern training frameworks (PyTorch 2.0+, etc.)
+
+### Code Example:
+```python
+# Vanilla Attention (memory inefficient)
+def vanilla_attention(Q, K, V):
+    # This materializes the full attention matrix in memory
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(Q.size(-1))
+    attention_weights = torch.softmax(scores, dim=-1)  # O(n²) memory
+    return torch.matmul(attention_weights, V)
+
+# Flash Attention (conceptual implementation)
+def flash_attention(Q, K, V, block_size=64):
+    B, H, N, D = Q.shape
+    output = torch.zeros_like(Q)
+    
+    # Tile the computation
+    for i in range(0, N, block_size):
+        for j in range(0, N, block_size):
+            # Extract blocks
+            Q_block = Q[:, :, i:i+block_size, :]
+            K_block = K[:, :, j:j+block_size, :]
+            V_block = V[:, :, j:j+block_size, :]
+            
+            # Compute attention for this block only
+            scores = torch.matmul(Q_block, K_block.transpose(-2, -1)) / math.sqrt(D)
+            
+            # Apply causal mask if needed
+            if j <= i:  # Lower triangular blocks
+                attn_weights = torch.softmax(scores, dim=-1)
+                output[:, :, i:i+block_size, :] += torch.matmul(attn_weights, V_block)
+    
+    return output
+
+# Actual Flash Attention uses more sophisticated online algorithms
+# with incremental softmax computation to avoid storing intermediate results
+```
+
+### Mathematical Difference:
+```
+Vanilla Attention:
+1. Compute S = QK^T  (store full n×n matrix)
+2. Compute P = softmax(S)  (store full n×n matrix)  
+3. Compute O = PV
+
+Flash Attention:
+1. Tile Q, K, V into blocks
+2. For each block: compute attention incrementally
+3. Use online softmax: avoid storing full attention matrix
+4. Memory: O(n) instead of O(n²)
+
+Key insight: Recompute attention during backward pass instead of storing
+```
+
+---
+
+## Summary Comparison Table
+
+| Feature | Vanilla Transformer | Modern LLMs | Key Benefits |
+|---------|-------------------|-------------|--------------|
+| LayerNorm | Pre-norm | Post-norm | Better gradient flow |
+| Attention | Multi-head (separate K,V) | MQA/GQA | Memory efficiency |
+| KV Storage | Recompute each time | KV Cache | Faster generation |
+| FFN | ReLU activation | SwiGLU/GeGLU | Better performance |
+| Scaling | Dense computation | MoE | Parameter efficiency |
+| Position | Absolute embedding | RoPE | Better extrapolation |
+| Memory | O(n²) attention | Flash Attention | Reduced memory |
+| KV Compression | Full storage | MLA variants | Smaller cache |
+
+Each of these innovations addresses specific limitations of the vanilla transformer, leading to more efficient, scalable, and capable language models.
