@@ -1,0 +1,62 @@
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+
+gsutil mb -l us-central1 gs://YOUR_BUCKET_NAME
+pip install google-cloud-storage
+
+from google.cloud import storage
+
+def upload_file(bucket_name, source_file, dest_path):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(dest_path)
+    blob.upload_from_filename(source_file)
+    print(f"Uploaded {source_file} to gs://{bucket_name}/{dest_path}")
+
+# Example usage
+upload_file(
+    bucket_name="YOUR_BUCKET_NAME",
+    source_file="local_file.jsonl",
+    dest_path="batch_inputs/local_file.jsonl"
+)
+
+
+{"contents":[{"role":"user","parts":[{"text":"Summarize this sentence: Vertex AI is awesome."}]}]}
+{"contents":[{"role":"user","parts":[{"text":"Explain how LLMs work."}]}]}
+
+
+pip install google-cloud-aiplatform
+from google.cloud import aiplatform
+
+def run_batch_job(project, location, model_id, input_uri, output_uri):
+    client = aiplatform.gapic.JobServiceClient(
+        client_options={"api_endpoint": f"{location}-aiplatform.googleapis.com"}
+    )
+
+    batch_request = {
+        "display_name": "python-batch-gemini",
+        "model": f"projects/{project}/locations/{location}/models/{model_id}",
+        "input_config": {
+            "instances_format": "jsonl",
+            "gcs_source": {"uris": [input_uri]},
+        },
+        "output_config": {
+            "predictions_format": "jsonl",
+            "gcs_destination": {"output_uri_prefix": output_uri},
+        },
+    }
+
+    response = client.create_batch_prediction_job(
+        parent=f"projects/{project}/locations/{location}",
+        batch_prediction_job=batch_request,
+    )
+    print("Batch job started:", response.name)
+
+# Example
+run_batch_job(
+    project="your-gcp-project",
+    location="us-central1",
+    model_id="gemini-2.5-flash",
+    input_uri="gs://your-bucket/batch_inputs/batch_input.jsonl",
+    output_uri="gs://your-bucket/batch_outputs/"
+)
