@@ -1,0 +1,30 @@
+Google Vertex AI offers Standard, Priority, and Flex as different commitment levels (or "provisioning models") for accessing Generative AI models. They primarily differ in terms of availability guarantees, cost, and throughput, rather than the quality or "intelligence" of the response.
+
+Here is a breakdown of how they differ and when to use each:
+
+1. Standard (Default)
+How it works: This is the basic pay-as-you-go tier. You share a pool of resources with other users.
+
+Availability: There are no uptime or capacity guarantees. If there is a massive spike in global traffic, you might experience "429 Too Many Requests" errors (rate limiting).
+
+Performance: Latency is generally good, but it can fluctuate depending on overall system load.
+
+Best Scenario: Use this for development, testing, and non-critical applications where an occasional retry is acceptable.
+
+2. Priority (Commitment-based)
+How it works: You pay a premium (or commit to a certain level of spend) to gain higher priority in the processing queue.
+
+Availability: It provides a higher level of assurance for capacity. You are much less likely to be rate-limited compared to the Standard tier during peak times.
+
+Performance: It offers more consistent latency because your requests are prioritized over Standard-tier traffic.
+
+Best Scenario: Use this for production-ready applications that require high reliability and consistent performance, especially if your traffic patterns are steady and predictable.
+
+3. Flex (Opportunistic/Discounted)
+How it works: Flex allows you to use "excess" capacity in the Google network. It is often offered at a lower price point or with different billing structures.
+
+Availability: This has the lowest priority. If the system becomes crowded, Flex requests are the first to be throttled or delayed to make room for Priority and Standard users.
+
+Performance: Latency can be higher or more "jittery" because the system processes these only when resources are idle.
+
+Best Scenario: Use this for offline, batch processing, or background tasks (like summarizing thousands of old documents or data labeling) where it doesn’t matter if the response takes 2 seconds or 20 seconds.
